@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build & Dist Outputs
+dist/
+frontend/dist/
+backend/gateway
+*.exe
+*.exe;
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Data & Storage Directories
+data/
+wal/
+tmp/
+backend/data/
+backend/wal/
+backend/tmp/
+
+# Logs & Data Artifacts
+*.log
+*.dat
+*.meta
+*.tmp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo

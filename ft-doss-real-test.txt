@@ -1,0 +1,4 @@
+FT-DOSS REAL FILE TEST
+This file is being stored as an actual object.
+The bytes must survive replication, node failure,
+corruption detection, repair, and retrieval.
