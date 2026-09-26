@@ -1,0 +1,29 @@
+services:
+  # ─── FT-DOSS API Gateway & Storage Backend ─────────────────────────────
+  - type: web
+    name: ft-doss-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    region: oregon
+    plan: free
+    envVars:
+      - key: FTDOSS_NODE_ID
+        value: storage-1
+      - key: FTDOSS_HTTP_PORT
+        value: 8080
+      - key: FTDOSS_ZONE
+        value: zone-1
+      - key: FTDOSS_ADMIN_API_KEY
+        value: dev-key
+
+  # ─── FT-DOSS Dashboard Frontend ───────────────────────────────────────
+  - type: web
+    name: ft-doss-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
