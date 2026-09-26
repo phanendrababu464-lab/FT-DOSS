@@ -38,7 +38,8 @@ export function useEventStream(maxEvents = 100) {
 
       if (!isMounted) return
 
-      const url = token ? `/api/events/stream?token=${encodeURIComponent(token)}` : '/api/events/stream'
+      const apiBase = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '')
+      const url = token ? `${apiBase}/events/stream?token=${encodeURIComponent(token)}` : `${apiBase}/events/stream`
       const es = new EventSource(url)
       eventSourceRef.current = es
 
