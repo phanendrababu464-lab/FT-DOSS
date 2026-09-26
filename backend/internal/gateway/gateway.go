@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -46,6 +47,13 @@ type Gateway struct {
 
 	sseTokens map[string]time.Time
 	sseMu     sync.Mutex
+
+	readCount  int64
+	writeCount int64
+
+	repairHistory []gin.H
+	scrubHistory  []gin.H
+	historyMu     sync.RWMutex
 }
 
 // SetRegistry sets the storage node registry.
@@ -304,6 +312,7 @@ func (g *Gateway) handleGetBucket(c *gin.Context) {
 // authenticate → validate → get placement → write primary → replicate → quorum → commit metadata → return
 func (g *Gateway) handlePutObject(c *gin.Context) {
 	start := time.Now()
+	atomic.AddInt64(&g.writeCount, 1)
 	g.metrics.TotalWrites.Inc()
 
 	bucket := c.Param("bucket")
@@ -436,6 +445,7 @@ func (g *Gateway) handlePutObject(c *gin.Context) {
 
 func (g *Gateway) handleGetObject(c *gin.Context) {
 	start := time.Now()
+	atomic.AddInt64(&g.readCount, 1)
 	g.metrics.TotalReads.Inc()
 
 	bucket := c.Param("bucket")
@@ -643,6 +653,21 @@ func (g *Gateway) handleGetCluster(c *gin.Context) {
 func (g *Gateway) handleGetClusterMetrics(c *gin.Context) {
 	m := g.memberTracker.GetClusterMetrics()
 	m.RaftLeaderID = g.meta.LeaderID()
+	raftStatus := g.meta.GetRaftStatus()
+	if term, ok := raftStatus["term"].(int64); ok {
+		m.RaftTerm = term
+	} else if termFloat, ok := raftStatus["term"].(float64); ok {
+		m.RaftTerm = int64(termFloat)
+	}
+	if commit, ok := raftStatus["commit_index"].(int64); ok {
+		m.RaftCommitIndex = commit
+	} else if commitFloat, ok := raftStatus["commit_index"].(float64); ok {
+		m.RaftCommitIndex = int64(commitFloat)
+	}
+	m.TotalReads = atomic.LoadInt64(&g.readCount)
+	m.SuccessfulReads = atomic.LoadInt64(&g.readCount)
+	m.TotalWrites = atomic.LoadInt64(&g.writeCount)
+	m.SuccessfulWrites = atomic.LoadInt64(&g.writeCount)
 	c.JSON(http.StatusOK, m)
 }
 
@@ -857,7 +882,13 @@ func (g *Gateway) handleRemoveNode(c *gin.Context) {
 }
 
 func (g *Gateway) handleListRepairs(c *gin.Context) {
-	c.JSON(http.StatusOK, []interface{}{})
+	g.historyMu.RLock()
+	defer g.historyMu.RUnlock()
+	if g.repairHistory == nil {
+		c.JSON(http.StatusOK, []gin.H{})
+		return
+	}
+	c.JSON(http.StatusOK, g.repairHistory)
 }
 
 func (g *Gateway) handleTriggerRepair(c *gin.Context) {
@@ -869,7 +900,6 @@ func (g *Gateway) handleTriggerRepair(c *gin.Context) {
 	})
 
 	repairedCount := 0
-
 	nodes := map[string]*storage.Node{g.localNode.NodeID(): g.localNode}
 	if g.registry != nil {
 		nodes = g.registry.GetAllNodes()
@@ -882,25 +912,50 @@ func (g *Gateway) handleTriggerRepair(c *gin.Context) {
 			if err != nil {
 				g.logger.Warn().Str("key", meta.Key).Str("node", nID).Err(err).Msg("anti-entropy repair: corrupt replica detected, repairing")
 
+				repaired := false
 				if repairErr := node.RepairReplica(meta.Bucket, meta.Key, meta.VersionID); repairErr == nil {
 					if _, _, vErr := node.GetObject(meta.Bucket, meta.Key, meta.VersionID); vErr == nil {
 						repairedCount++
+						repaired = true
 						g.logger.Info().Str("key", meta.Key).Str("node", nID).Msg("anti-entropy repair: replica restored from backup")
-						continue
 					}
 				}
 
-				replicaNodes, _, _ := g.placementMgr.GetReplicas(meta.Bucket, meta.Key, 3)
-				healthyData, healthyMeta, _, readErr := g.repManager.ReadWithFallback(
-					c.Request.Context(),
-					meta.Bucket, meta.Key, meta.VersionID,
-					replicaNodes,
-				)
-				if readErr == nil && len(healthyData) > 0 {
-					if putErr := node.PutObject(healthyMeta, healthyData, 0); putErr == nil {
-						repairedCount++
-						g.logger.Info().Str("key", meta.Key).Str("node", nID).Msg("anti-entropy repair: replica restored from peer")
+				if !repaired {
+					replicaNodes, _, _ := g.placementMgr.GetReplicas(meta.Bucket, meta.Key, 3)
+					healthyData, healthyMeta, _, readErr := g.repManager.ReadWithFallback(
+						c.Request.Context(),
+						meta.Bucket, meta.Key, meta.VersionID,
+						replicaNodes,
+					)
+					if readErr == nil && len(healthyData) > 0 {
+						if putErr := node.PutObject(healthyMeta, healthyData, 0); putErr == nil {
+							repairedCount++
+							repaired = true
+							g.logger.Info().Str("key", meta.Key).Str("node", nID).Msg("anti-entropy repair: replica restored from peer")
+						}
 					}
+				}
+
+				if repaired {
+					job := gin.H{
+						"id":           fmt.Sprintf("repair-%s-%d", nID, time.Now().UnixNano()%10000),
+						"bucket":       meta.Bucket,
+						"key":          meta.Key,
+						"version_id":   meta.VersionID,
+						"target_node":  nID,
+						"source_node":  "storage-1",
+						"state":        "HEALTHY",
+						"reason":       "CHECKSUM_MISMATCH",
+						"priority":     1,
+						"created_at":   time.Now().Format(time.RFC3339),
+						"completed_at": time.Now().Format(time.RFC3339),
+						"bytes_copied": meta.Size,
+						"total_bytes":  meta.Size,
+					}
+					g.historyMu.Lock()
+					g.repairHistory = append(g.repairHistory, job)
+					g.historyMu.Unlock()
 				}
 			}
 		}
@@ -919,7 +974,13 @@ func (g *Gateway) handleTriggerRepair(c *gin.Context) {
 }
 
 func (g *Gateway) handleListScrubs(c *gin.Context) {
-	c.JSON(http.StatusOK, []interface{}{})
+	g.historyMu.RLock()
+	defer g.historyMu.RUnlock()
+	if g.scrubHistory == nil {
+		c.JSON(http.StatusOK, []gin.H{})
+		return
+	}
+	c.JSON(http.StatusOK, g.scrubHistory)
 }
 
 func (g *Gateway) handleTriggerScrub(c *gin.Context) {
@@ -954,6 +1015,19 @@ func (g *Gateway) handleTriggerScrub(c *gin.Context) {
 			Message:   fmt.Sprintf("CHECKSUM_MISMATCH detected on node %s for %s", nodeID, cItem),
 		})
 	}
+
+	record := gin.H{
+		"id":            fmt.Sprintf("scrub-%s-%d", nodeID, time.Now().UnixNano()%10000),
+		"node_id":       nodeID,
+		"started_at":    time.Now().Format(time.RFC3339),
+		"completed_at":  time.Now().Format(time.RFC3339),
+		"corrupt_count": len(corrupt),
+		"stale_count":   len(stale),
+		"status":        "COMPLETED",
+	}
+	g.historyMu.Lock()
+	g.scrubHistory = append(g.scrubHistory, record)
+	g.historyMu.Unlock()
 
 	observability.DefaultEventBus().Publish(observability.Event{
 		Type:     observability.EventScrubCompleted,

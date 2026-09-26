@@ -393,7 +393,7 @@ func (n *Node) RepairReplica(bucket, key, versionID string) error {
 		_ = os.Remove(bakPath)
 		return nil
 	}
-	return nil
+	return fmt.Errorf("no backup data available for %s/%s", bucket, key)
 }
 
 // ─── Node State ───────────────────────────────────────────────────────────────

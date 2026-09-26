@@ -14,7 +14,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     echo "Docker Compose detected. Starting containers via Docker Compose..."
     docker compose up -d --build
 else
-    echo "Starting FT-DOSS locally..."
+    mkdir -p tmp
 
     # Check if backend (port 8080) is already listening
     if ! curl -s http://localhost:8080/health >/dev/null 2>&1; then
@@ -33,7 +33,7 @@ else
     if ! curl -s http://localhost:3000 >/dev/null 2>&1; then
         echo "Starting frontend dev server..."
         cd frontend
-        CI=true nohup npx vite --host 0.0.0.0 --port 3000 > ../tmp/frontend_daemon.log 2>&1 & disown
+        CI=true nohup npx vite --host 0.0.0.0 --port 3000 < /dev/null > ../tmp/frontend_daemon.log 2>&1 & disown
         cd ..
     else
         echo "Frontend is already running on port 3000."
